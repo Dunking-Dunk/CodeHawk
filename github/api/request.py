@@ -13,7 +13,7 @@ from multipledispatch import dispatch
 from github.api.utils.timeout import async_timeout
 from github.api.models import *
 from github.core.exception import (_handle_http_error, GithubException, RateLimitExceededException)
-from .endpoints import *
+from .utils.endpoints import *
 
 load_dotenv()
 TIMEOUT: int = 45
