@@ -7,6 +7,7 @@ from pydantic import ValidationError
 import time
 import os
 from dotenv import load_dotenv
+from multipledispatch import dispatch
 
 #custom imports
 from github.api.utils.timeout import async_timeout
@@ -38,7 +39,7 @@ class APIConfig:
     repo: str
     branch: Optional[str] = None
     token: Optional[str] = None
-    path: Optional[List] = None
+    path: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     
     
@@ -100,7 +101,7 @@ class APIHandler:
             self.headers["Authorization"] = f"token {self.git_token}"
         self.session = aiohttp.ClientSession(headers=self.headers)
         
-    async def __aenter___(self):
+    async def __aenter__(self):
         return self
     
     async def __aexit__(self, exc_type, exc, tb):
@@ -216,35 +217,37 @@ class APIHandler:
             branch=config['branch']
         )
         return await self._make_request(url, RepoTreeModel)
+    
 
-    async def get_raw_file(self) -> ProjectFile:
+    async def get_raw_file(self, path: Optional[str] = None) -> ProjectFile:
         """
-        Retrieve the raw content of a file from a GitHub repository.
-
-        This method fetches the raw file content for a given file path 
-        in a specified branch of a repository.
-
+        Retrieve raw file content from repository.
+        
+        Args:
+            path (str, optional): Specific file path to fetch. Uses config.path if not provided
+            
         Returns:
-            ProjectFile: A model containing the file's content.
-
-        Raises:
-            aiohttp.ClientError: If an HTTP request fails.
-            aiohttp.HttpProcessingError: If there is an HTTP error while fetching the file.
+            ProjectFile: Contains file content and metadata
         """
-        config = self.get_config(['user', 'repo', 'branch', 'path'])
+        final_path = path or self.config.path
+        if not final_path:
+            raise ValueError("No path specified for raw file retrieval")
+
+        config = self.get_config(['user', 'repo', 'branch'])
         url = RAW_FILE_BY_BRANCH.format(
             user=config['user'],
             repo=config['repo'],
             branch=config['branch'],
-            path=config['path']
+            path=final_path
         )
+        
         try:
             async with self.session.get(url) as response:
                 response.raise_for_status()
                 content = await response.text()
                 return ProjectFile(file_content=content)
         except aiohttp.ClientError as e:
-            await _handle_http_error(Exception ,response)
+            await _handle_http_error(response)
             
 @async_timeout(TIMEOUT)
 async def check_api_available() -> bool:
@@ -299,32 +302,34 @@ async def github_api_handler(config: APIConfig) -> Dict[str, Any]:
     if not await check_api_available():
         raise GithubException("GitHub API unavailable")
 
-    # async with APIHandler(config) as handler:
-    handler = APIHandler(config)
-    results = {}
+    async with APIHandler(config) as handler:
+        results = {}
+        
+        try:
+            # Get basic information
+            results.update({
+                "rate_limit": await handler.get_rate_limit(),
+                "user": await handler.get_user(),
+                "repo": await handler.get_repo()
+            })
 
-    try:
-        # Get rate limit status
-        results["rate_limit"] = await handler.get_rate_limit()
+            # Handle file content retrieval
+            results["files"] = {}
+            
+            if config.path:
+                results["files"][config.path] = (await handler.get_raw_file()).file_content
+            elif config.branch:
+                results["tree"] = await handler.get_repo_tree()
+                blob_paths = results["tree"].blobs
+                print(blob_paths)
+                
+                for file_path in blob_paths:
+                    results["files"][file_path] = (await handler.get_raw_file(file_path)).file_content
 
-        # Get user details
-        results["user"] = await handler.get_user()
-
-        # Get repository details
-        results["repo"] = await handler.get_repo()
-
-        # Get repository tree if branch specified
-        if config.branch:
-            results["tree"] = await handler.get_repo_tree()
-
-        # Get raw file if path and branch specified
-        if config.path and config.branch:
-            results["file"] = await handler.get_raw_file()
-
-        return results
-
-    except RateLimitExceededException as e:
-        reset_time = handler.rate_limit.reset
-        wait_time = max(0, reset_time - time.time())
-        await asyncio.sleep(wait_time)
-        return await github_api_handler(config)
+            return results
+        
+        except RateLimitExceededException as e:
+            reset_time = handler.rate_limit.reset
+            wait_time = max(0, reset_time - time.time())
+            await asyncio.sleep(wait_time)
+            return await github_api_handler(config)
