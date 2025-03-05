@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, List
 
 #custom model
-from github.github_client.models.owner import GitHubUser
+from .owner import GitHubUser
 
 class Repository(BaseModel):
     name: str
