@@ -56,18 +56,13 @@ async def clone_repo(config: CloneConfig) -> None:
     except OSError as exc:
         raise OSError(f"Failed to create parent directory {parent_dir}: {exc}") from exc
 
-    # Check if the repository exists
     if not await _check_repo_exists(url):
         raise ValueError("Repository not found, make sure it is public")
 
     # Build the Git clone command
     clone_cmd = ["git", "clone", "--single-branch", "--depth=1"]
-
-    # Add sparse clone options if needed
     if partial_clone:
         clone_cmd += ["--filter=blob:none", "--sparse"]
-
-    # Add branch if specified and not default
     if branch and branch.lower() not in ("main", "master"):
         clone_cmd += ["--branch", branch]
 

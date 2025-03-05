@@ -7,7 +7,6 @@ from pydantic import ValidationError
 import time
 import os
 from dotenv import load_dotenv
-from multipledispatch import dispatch
 
 #custom imports
 from github.api.utils.timeout import async_timeout
