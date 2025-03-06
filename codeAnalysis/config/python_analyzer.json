@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "config_path": "config/prospector.yaml",
+  "ignored_patterns": [
+    "/tests/", 
+    "/venv/", 
+    "/env/",
+    "__pycache__",
+    "/dist/",
+    "/build/"
+  ],
+  "severity_threshold": "low",
+  "strictness": "medium",
+  "run_pyflakes": true,
+  "run_pylint": true,
+  "run_mccabe": true,
+  "run_dodgy": true,
+  "run_pep8": true,
+  "run_bandit": true,
+  "max_complexity": 10,
+  "ignored_messages": {
+    "pep8": ["E501"],
+    "pylint": []
+  }
+} 

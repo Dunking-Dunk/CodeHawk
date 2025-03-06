@@ -1,0 +1,54 @@
+output-format: json
+
+strictness: medium
+doc-warnings: true
+test-warnings: false
+max-line-length: 100
+
+ignore-paths:
+  - env/
+  - venv/
+  - tests/
+  - docs/
+  - build/
+  - dist/
+
+pep8:
+  disable:
+    - E501  # Line too long
+    - W291  # Trailing whitespace
+    - W293  # Blank line contains whitespace
+    - W391  # Blank line at end of file
+    - E303  # Too many blank lines
+
+pylint:
+  disable:
+    - missing-docstring
+    - too-few-public-methods
+    - invalid-name
+    - logging-fstring-interpolation
+    - too-many-arguments
+    - too-many-locals
+    - too-many-branches
+    - too-many-statements
+    - fixme
+    - no-self-use
+
+pyflakes:
+  run: true
+
+mccabe:
+  run: true
+  max-complexity: 12
+
+dodgy:
+  run: true
+
+frosted:
+  run: true
+
+mypy:
+  run: true
+
+bandit:
+  run: true 
