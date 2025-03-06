@@ -5,7 +5,24 @@ import argparse
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 
-# Import the individual language analyzers
+def pydantic_model_to_dict(obj):
+    """
+    Convert Pydantic models to dictionaries for JSON serialization.
+    Works recursively for nested models, lists and dictionaries.
+    """
+    if hasattr(obj, 'model_dump'):
+        # Pydantic v2
+        return obj.model_dump()
+    elif hasattr(obj, 'dict'):
+        # Pydantic v1
+        return obj.dict()
+    elif isinstance(obj, dict):
+        return {k: pydantic_model_to_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [pydantic_model_to_dict(i) for i in obj]
+    else:
+        return obj
+
 try:
     from .python_analyzer import PythonAnalyzer
 except ImportError:
@@ -58,12 +75,12 @@ class CodeAnalysis:
         self.available_analyzer_classes = {}
         self.initialized_analyzers = set()
         
-        # Initialize config paths if not provided
+      
         if config_paths is None:
             config_paths = {}
         self.config_paths = config_paths
         
-        # Register available analyzer classes without initializing them
+       
         if PythonAnalyzer:
             self.available_analyzer_classes['python'] = PythonAnalyzer
             
@@ -102,26 +119,19 @@ class CodeAnalysis:
             return False
             
         try:
-            if analyzer_type == 'python':
-                self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type](
-                    config_path=self.config_paths.get('python')
-                )
-            elif analyzer_type == 'javascript':
-                self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type](
-                    config_path=self.config_paths.get('javascript')
-                )
-            elif analyzer_type == 'java':
-                self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type](
-                    pmd_path=self.config_paths.get('java_pmd'),
-                    spotbugs_path=self.config_paths.get('java_spotbugs')
-                )
-            elif analyzer_type == 'cpp':
-                self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type](
-                    config_path=self.config_paths.get('cpp')
-                )
-            else:
-                # Generic initialization for any other analyzers
-                self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type]()
+            try:
+                from models.analysis_models import AnalysisConfig
+            except ImportError:
+                try:
+                    from .models.analysis_models import AnalysisConfig
+                except ImportError:
+
+                    from codeAnalysis.models.analysis_models import AnalysisConfig
+            
+            config = AnalysisConfig()
+            
+            # Initialize the analyzer with the config object
+            self.analyzers[analyzer_type] = self.available_analyzer_classes[analyzer_type](config=config)
                 
             self.initialized_analyzers.add(analyzer_type)
             return True
@@ -304,47 +314,721 @@ def main():
     else:
         results = analyzer.analyze_directory(args.path, args.recursive, args.analyzers)
     
+    # Convert Pydantic models to dictionaries for JSON serialization
+    results = pydantic_model_to_dict(results)
+    
     # Format the output
     if args.format == "json":
         output = json.dumps(results, indent=2)
     elif args.format == "html":
-        # Create a simple HTML report
-        output = "<html><head><title>CodeHawk Analysis Report</title>"
-        output += "<style>body{font-family:sans-serif;margin:20px;} h1{color:#333;} "
-        output += ".issue{margin-bottom:10px;padding:5px;border-left:3px solid #ccc;} "
-        output += ".error{border-color:red;} .warning{border-color:orange;}</style></head>"
-        output += f"<body><h1>Analysis Report for {args.path}</h1>"
+        # Create a more modern and interactive HTML report
+        output = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeHawk Analysis Report</title>
+    <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --success-color: #2ecc71;
+            --warning-color: #f39c12;
+            --danger-color: #e74c3c;
+            --info-color: #1abc9c;
+            --light-color: #ecf0f1;
+            --dark-color: #34495e;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f9f9f9;
+            padding: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            background-color: var(--secondary-color);
+            color: white;
+            padding: 20px;
+            border-radius: 5px 5px 0 0;
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            margin-bottom: 10px;
+            font-weight: 300;
+            font-size: 2.5rem;
+        }
+        
+        h2 {
+            color: var(--secondary-color);
+            margin: 20px 0 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid var(--primary-color);
+            font-weight: 400;
+        }
+        
+        .summary {
+            background-color: white;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .summary-card {
+            background-color: var(--light-color);
+            padding: 15px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        
+        .summary-card h3 {
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+        
+        .summary-card .count {
+            font-size: 2rem;
+            font-weight: 300;
+            color: var(--primary-color);
+        }
+        
+        .analysis-section {
+            background-color: white;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            font-size: 0.95rem;
+        }
+        
+        th {
+            background-color: var(--secondary-color);
+            color: white;
+            text-align: left;
+            padding: 12px 15px;
+            position: sticky;
+            top: 0;
+            cursor: pointer;
+        }
+        
+        th:hover {
+            background-color: var(--dark-color);
+        }
+        
+        td {
+            padding: 10px 15px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        
+        .severity {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            color: white;
+        }
+        
+        .severity-critical {
+            background-color: var(--danger-color);
+        }
+        
+        .severity-high {
+            background-color: #ff5722;
+        }
+        
+        .severity-medium {
+            background-color: var(--warning-color);
+        }
+        
+        .severity-low {
+            background-color: #3498db;
+        }
+        
+        .severity-info {
+            background-color: var(--info-color);
+        }
+        
+        .code-location {
+            font-family: monospace;
+            background-color: #f5f5f5;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .filter-select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: white;
+            color: var(--secondary-color);
+        }
+        
+        .filter-button {
+            padding: 8px 12px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .search-input {
+            flex-grow: 1;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .no-findings {
+            padding: 20px;
+            text-align: center;
+            color: #777;
+            font-style: italic;
+        }
+        
+        .expandable-row {
+            cursor: pointer;
+        }
+        
+        .expandable-row.expanded {
+            background-color: #f0f7ff;
+        }
+        
+        .issue-details {
+            display: none;
+            padding: 10px 15px 10px 45px;
+            background-color: #f0f7ff;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .expanded + .issue-details {
+            display: table-row;
+        }
+        
+        .details-title {
+            font-weight: 500;
+            margin-top: 8px;
+            margin-bottom: 4px;
+        }
+        
+        .fix-suggestions {
+            margin-top: 4px;
+            padding-left: 20px;
+        }
+        
+        .fix-suggestion {
+            margin-bottom: 2px;
+        }
+        
+        footer {
+            margin-top: 30px;
+            text-align: center;
+            font-size: 0.85rem;
+            color: #777;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>CodeHawk Analysis Report</h1>
+        <p>Static code analysis for: ${args.path}</p>
+    </header>
+    
+    <div class="summary">
+        <h2>Analysis Summary</h2>
+        <div class="summary-grid">"""
+        
+        # Count total issues by severity
+        total_findings = {
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "info": 0
+        }
+        
+        total_by_language = {}
+        
+        # Process results to count findings
+        for lang, lang_results in results.items():
+            lang_count = 0
+            
+            # Handle different result formats from different analyzers
+            if isinstance(lang_results, dict) and "findings" in lang_results:
+                # Standard format with findings list
+                findings = lang_results.get("findings", [])
+                lang_count = len(findings)
+                
+                # Count by severity
+                for finding in findings:
+                    severity = finding.get("severity", "").lower()
+                    if severity in total_findings:
+                        total_findings[severity] += 1
+            
+            elif lang == "python" and "messages" in lang_results:
+                # Python specific format
+                messages = lang_results.get("messages", [])
+                lang_count = len(messages)
+                
+                # Map severity
+                for msg in messages:
+                    severity = "medium"  # Default
+                    if msg.get("type") == "error":
+                        severity = "high"
+                    elif msg.get("type") == "warning":
+                        severity = "medium"
+                    
+                    if severity in total_findings:
+                        total_findings[severity] += 1
+            
+            elif lang == "javascript" and isinstance(lang_results, list):
+                # JavaScript format
+                total_issues = sum(len(file_result.get("messages", [])) for file_result in lang_results)
+                lang_count = total_issues
+                
+                # Count by severity
+                for file_result in lang_results:
+                    for msg in file_result.get("messages", []):
+                        severity = "medium"  # Default
+                        if msg.get("severity") == 2:
+                            severity = "high"
+                        elif msg.get("severity") == 1:
+                            severity = "medium"
+                        
+                        if severity in total_findings:
+                            total_findings[severity] += 1
+            
+            # Store language total
+            total_by_language[lang] = lang_count
+        
+        # Add summary cards
+        total_issues = sum(total_findings.values())
+        output += f"""
+            <div class="summary-card">
+                <h3>Total Issues</h3>
+                <div class="count">{total_issues}</div>
+            </div>"""
+        
+        # Add severity summary cards
+        for severity, count in total_findings.items():
+            if count > 0:
+                output += f"""
+            <div class="summary-card">
+                <h3>{severity.capitalize()}</h3>
+                <div class="count">{count}</div>
+            </div>"""
+        
+        # Add language summary cards
+        for lang, count in total_by_language.items():
+            if count > 0:
+                output += f"""
+            <div class="summary-card">
+                <h3>{lang.capitalize()}</h3>
+                <div class="count">{count}</div>
+            </div>"""
+        
+        output += """
+        </div>
+    </div>
+    """
         
         # Format each language's results
         for lang, lang_results in results.items():
-            output += f"<h2>{lang.capitalize()} Analysis</h2>"
+            output += f"""
+    <div class="analysis-section">
+        <h2>{lang.capitalize()} Analysis</h2>
+        <div class="filters">
+            <input type="text" class="search-input" placeholder="Search issues..." onkeyup="filterTable('{lang}')">
+            <select class="filter-select" id="{lang}-severity-filter" onchange="filterTable('{lang}')">
+                <option value="all">All Severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="info">Info</option>
+            </select>
+            <button class="filter-button" onclick="resetFilters('{lang}')">Reset Filters</button>
+        </div>
+    """
             
             # Handle different result formats from different analyzers
-            if lang == "python" and "messages" in lang_results:
-                output += f"<p>Found {len(lang_results['messages'])} issues</p>"
-                for msg in lang_results["messages"]:
-                    severity_class = "error" if msg.get("type") == "error" else "warning"
-                    output += f"<div class='issue {severity_class}'>"
-                    output += f"<strong>{msg.get('source')}:{msg.get('code')}</strong>: "
-                    output += f"{msg.get('message')} "
-                    location = msg.get("location", {})
-                    output += f"({location.get('path')}:{location.get('line')})"
-                    output += "</div>"
-            elif lang == "javascript" and isinstance(lang_results, list):
-                total_issues = sum(len(file_result.get("messages", [])) for file_result in lang_results)
-                output += f"<p>Found {total_issues} issues</p>"
-                for file_result in lang_results:
-                    for msg in file_result.get("messages", []):
-                        severity_class = "error" if msg.get("severity") == 2 else "warning"
-                        output += f"<div class='issue {severity_class}'>"
-                        output += f"<strong>{msg.get('ruleId')}</strong>: "
-                        output += f"{msg.get('message')} "
-                        output += f"({file_result.get('filePath')}:{msg.get('line')}:{msg.get('column')})"
-                        output += "</div>"
-            else:
-                output += f"<pre>{json.dumps(lang_results, indent=2)}</pre>"
+            if isinstance(lang_results, dict) and "findings" in lang_results:
+                # Standard format with findings list
+                findings = lang_results.get("findings", [])
                 
-        output += "</body></html>"
+                output += f"""
+        <table id="{lang}-table">
+            <thead>
+                <tr>
+                    <th onclick="sortTable('{lang}-table', 0)">Severity</th>
+                    <th onclick="sortTable('{lang}-table', 1)">Message</th>
+                    <th onclick="sortTable('{lang}-table', 2)">Location</th>
+                    <th onclick="sortTable('{lang}-table', 3)">Rule</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+                
+                if not findings:
+                    output += f"""
+                <tr>
+                    <td colspan="4" class="no-findings">No issues found for {lang}</td>
+                </tr>
+            """
+                else:
+                    for i, finding in enumerate(findings):
+                        severity = finding.get("severity", "").lower()
+                        message = finding.get("message", "")
+                        location = finding.get("location", {})
+                        file_path = location.get("file", "")
+                        line = location.get("line_start", "")
+                        column = location.get("column_start", "")
+                        location_text = f"{os.path.basename(file_path)}:{line}"
+                        if column:
+                            location_text += f":{column}"
+                        rule_id = finding.get("rule_id", "")
+                        
+                        output += f"""
+                <tr class="expandable-row" onclick="toggleDetails(this)">
+                    <td><span class="severity severity-{severity}">{severity}</span></td>
+                    <td>{message}</td>
+                    <td><span class="code-location">{location_text}</span></td>
+                    <td>{rule_id}</td>
+                </tr>
+                <tr class="issue-details">
+                    <td colspan="4">
+                        <div class="details-title">File:</div>
+                        <div>{file_path}</div>
+                """
+                        
+                        # Add fix suggestions if available
+                        fix_suggestions = finding.get("fix_suggestions", [])
+                        if fix_suggestions:
+                            output += """
+                        <div class="details-title">Fix Suggestions:</div>
+                        <ul class="fix-suggestions">
+                        """
+                            
+                            for suggestion in fix_suggestions:
+                                output += f"""
+                            <li class="fix-suggestion">{suggestion}</li>
+                        """
+                            
+                            output += """
+                        </ul>
+                        """
+                        
+                        output += """
+                    </td>
+                </tr>
+                """
+            
+            elif lang == "python" and "messages" in lang_results:
+                # Python specific format
+                messages = lang_results.get("messages", [])
+                
+                output += f"""
+        <table id="{lang}-table">
+            <thead>
+                <tr>
+                    <th onclick="sortTable('{lang}-table', 0)">Severity</th>
+                    <th onclick="sortTable('{lang}-table', 1)">Message</th>
+                    <th onclick="sortTable('{lang}-table', 2)">Location</th>
+                    <th onclick="sortTable('{lang}-table', 3)">Source</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+                
+                if not messages:
+                    output += f"""
+                <tr>
+                    <td colspan="4" class="no-findings">No issues found for {lang}</td>
+                </tr>
+            """
+                else:
+                    for msg in messages:
+                        severity = "medium"  # Default
+                        severity_class = "severity-medium"
+                        
+                        if msg.get("type") == "error":
+                            severity = "high"
+                            severity_class = "severity-high"
+                        elif msg.get("type") == "warning":
+                            severity = "medium"
+                            severity_class = "severity-medium"
+                        
+                        message = msg.get("message", "")
+                        source = msg.get("source", "")
+                        code = msg.get("code", "")
+                        location = msg.get("location", {})
+                        file_path = location.get("path", "")
+                        line = location.get("line", "")
+                        
+                        output += f"""
+                <tr class="expandable-row" onclick="toggleDetails(this)">
+                    <td><span class="severity {severity_class}">{severity}</span></td>
+                    <td>{message}</td>
+                    <td><span class="code-location">{os.path.basename(file_path)}:{line}</span></td>
+                    <td>{source}:{code}</td>
+                </tr>
+                <tr class="issue-details">
+                    <td colspan="4">
+                        <div class="details-title">File:</div>
+                        <div>{file_path}</div>
+                    </td>
+                </tr>
+                """
+            
+            elif lang == "javascript" and isinstance(lang_results, list):
+                # JavaScript format
+                output += f"""
+        <table id="{lang}-table">
+            <thead>
+                <tr>
+                    <th onclick="sortTable('{lang}-table', 0)">Severity</th>
+                    <th onclick="sortTable('{lang}-table', 1)">Message</th>
+                    <th onclick="sortTable('{lang}-table', 2)">Location</th>
+                    <th onclick="sortTable('{lang}-table', 3)">Rule</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+                
+                has_messages = False
+                for file_result in lang_results:
+                    messages = file_result.get("messages", [])
+                    file_path = file_result.get("filePath", "")
+                    
+                    if messages:
+                        has_messages = True
+                        
+                    for msg in messages:
+                        severity = "medium"  # Default
+                        severity_class = "severity-medium"
+                        
+                        if msg.get("severity") == 2:
+                            severity = "high"
+                            severity_class = "severity-high"
+                        elif msg.get("severity") == 1:
+                            severity = "medium"
+                            severity_class = "severity-medium"
+                        
+                        message = msg.get("message", "")
+                        line = msg.get("line", "")
+                        column = msg.get("column", "")
+                        rule_id = msg.get("ruleId", "")
+                        
+                        output += f"""
+                <tr class="expandable-row" onclick="toggleDetails(this)">
+                    <td><span class="severity {severity_class}">{severity}</span></td>
+                    <td>{message}</td>
+                    <td><span class="code-location">{os.path.basename(file_path)}:{line}:{column}</span></td>
+                    <td>{rule_id}</td>
+                </tr>
+                <tr class="issue-details">
+                    <td colspan="4">
+                        <div class="details-title">File:</div>
+                        <div>{file_path}</div>
+                    </td>
+                </tr>
+                """
+                
+                if not has_messages:
+                    output += f"""
+                <tr>
+                    <td colspan="4" class="no-findings">No issues found for {lang}</td>
+                </tr>
+            """
+            else:
+                # Generic format for other languages
+                output += f"""
+        <pre>{json.dumps(lang_results, indent=2)}</pre>
+        """
+            
+            output += """
+            </tbody>
+        </table>
+    </div>
+            """
+        
+        # Add JavaScript for interactivity
+        output += """
+    <footer>
+        Generated by CodeHawk Static Analysis Tool
+    </footer>
+
+    <script>
+        // Function to toggle details visibility
+        function toggleDetails(row) {
+            row.classList.toggle('expanded');
+        }
+        
+        // Function to sort table
+        function sortTable(tableId, columnIndex) {
+            const table = document.getElementById(tableId);
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr.expandable-row'));
+            
+            // Get current sort direction
+            const currentDir = table.getAttribute('data-sort-dir') || 'asc';
+            const newDir = currentDir === 'asc' ? 'desc' : 'asc';
+            
+            // Update table sort attributes
+            table.setAttribute('data-sort-dir', newDir);
+            table.setAttribute('data-sort-col', columnIndex);
+            
+            // Sort the rows
+            rows.sort((a, b) => {
+                const aValue = a.cells[columnIndex].textContent.trim();
+                const bValue = b.cells[columnIndex].textContent.trim();
+                
+                // For severity column, use custom order
+                if (columnIndex === 0) {
+                    const severityOrder = {
+                        'critical': 0,
+                        'high': 1,
+                        'medium': 2,
+                        'low': 3,
+                        'info': 4
+                    };
+                    
+                    const aOrder = severityOrder[aValue.toLowerCase()] || 999;
+                    const bOrder = severityOrder[bValue.toLowerCase()] || 999;
+                    
+                    return newDir === 'asc' ? aOrder - bOrder : bOrder - aOrder;
+                }
+                
+                // Regular string comparison for other columns
+                const comparison = aValue.localeCompare(bValue);
+                return newDir === 'asc' ? comparison : -comparison;
+            });
+            
+            // Reorder the rows in the DOM
+            rows.forEach(row => {
+                const detailsRow = row.nextElementSibling;
+                tbody.appendChild(row);
+                if (detailsRow && detailsRow.classList.contains('issue-details')) {
+                    tbody.appendChild(detailsRow);
+                }
+            });
+        }
+        
+        // Function to filter table
+        function filterTable(lang) {
+            const tableId = `${lang}-table`;
+            const table = document.getElementById(tableId);
+            const rows = table.querySelectorAll('tbody tr.expandable-row');
+            
+            // Get the search input and severity filter for this table's section
+            // Use more compatible selector approach instead of :has()
+            const sections = document.querySelectorAll('.analysis-section');
+            let searchInput, severityFilter;
+            
+            for (const section of sections) {
+                if (section.querySelector(`#${tableId}`)) {
+                    searchInput = section.querySelector('.search-input');
+                    severityFilter = document.getElementById(`${lang}-severity-filter`);
+                    break;
+                }
+            }
+            
+            if (!searchInput || !severityFilter) return;
+            
+            const searchTerm = searchInput.value.toLowerCase();
+            const severityValue = severityFilter.value.toLowerCase();
+            
+            rows.forEach(row => {
+                const detailsRow = row.nextElementSibling;
+                let shouldShow = true;
+                
+                // Check search term
+                if (searchTerm) {
+                    const rowText = row.textContent.toLowerCase();
+                    if (!rowText.includes(searchTerm)) {
+                        shouldShow = false;
+                    }
+                }
+                
+                // Check severity filter
+                if (severityValue !== 'all') {
+                    const severityCell = row.cells[0].textContent.toLowerCase();
+                    if (severityCell !== severityValue) {
+                        shouldShow = false;
+                    }
+                }
+                
+                // Show/hide rows
+                row.style.display = shouldShow ? '' : 'none';
+                if (detailsRow) {
+                    detailsRow.style.display = 'none'; // Always hide details when filtering
+                }
+            });
+        }
+        
+        // Function to reset filters
+        function resetFilters(lang) {
+            const tableId = `${lang}-table`;
+            
+            // Use more compatible selector approach
+            const sections = document.querySelectorAll('.analysis-section');
+            let searchInput, severityFilter;
+            
+            for (const section of sections) {
+                if (section.querySelector(`#${tableId}`)) {
+                    searchInput = section.querySelector('.search-input');
+                    severityFilter = document.getElementById(`${lang}-severity-filter`);
+                    break;
+                }
+            }
+            
+            if (!searchInput || !severityFilter) return;
+            
+            searchInput.value = '';
+            severityFilter.value = 'all';
+            
+            filterTable(lang);
+        }
+    </script>
+</body>
+</html>"""
     else:  # text format
         output = f"CodeHawk Analysis Report for {args.path}\n"
         output += "=" * 40 + "\n\n"

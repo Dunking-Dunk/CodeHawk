@@ -7,18 +7,23 @@ import sys
 import os
 
 # Ensure the current directory is in the Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(current_dir))
 
 try:
-    # First try importing directly
-    from code_analysis import main
+    # Try importing as a package first
+    from codeAnalysis.code_analysis import main
 except ImportError:
     try:
-        # Try with relative import
+        # Try relative import
         from .code_analysis import main
     except ImportError:
-        print("Error: Could not import code_analysis module. Make sure it exists in the same directory.")
-        sys.exit(1)
+        try:
+            # Try direct import
+            from code_analysis import main
+        except ImportError:
+            print("Error: Could not import code_analysis module. Make sure it exists in the same directory.")
+            sys.exit(1)
 
 if __name__ == "__main__":
     try:

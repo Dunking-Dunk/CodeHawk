@@ -3,20 +3,28 @@ import sys
 import json
 import subprocess
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Set
 from dataclasses import dataclass
 
+# Fix imports to handle both package and direct imports
 try:
     from .models.analysis_models import (
         AnalysisResult, AnalysisFinding, CodeLocation,
         SeverityLevel, AnalysisType, AnalysisConfig
     )
 except ImportError:
-    from models.analysis_models import (
-        AnalysisResult, AnalysisFinding, CodeLocation,
-        SeverityLevel, AnalysisType, AnalysisConfig
-    )
+    try:
+        from models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
+    except ImportError:
+        from codeAnalysis.models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
 
 class JavaScriptAnalyzer:
     """
@@ -30,6 +38,55 @@ class JavaScriptAnalyzer:
     
     def _initialize_tools(self):
         """Initialize all required analysis tools."""
+        # Store npm directory for locally installed tools
+        self.npm_bin_path = None
+        try:
+            if os.name == 'nt':  # Windows
+                # Get npm prefix path
+                result = subprocess.run(
+                    ["npm", "prefix", "-g"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=True
+                )
+                if result.returncode == 0:
+                    prefix = result.stdout.strip()
+                    # On Windows, global installations usually go to /node_modules/.bin
+                    self.npm_global_bin_path = os.path.join(prefix, "node_modules", ".bin")
+                
+                # Also try to get the local npm bin path
+                result = subprocess.run(
+                    ["npm", "bin"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=True
+                )
+                if result.returncode == 0:
+                    self.npm_bin_path = result.stdout.strip()
+            else:
+                # For non-Windows systems
+                result = subprocess.run(
+                    ["npm", "bin", "-g"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    self.npm_global_bin_path = result.stdout.strip()
+                
+                result = subprocess.run(
+                    ["npm", "bin"],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    self.npm_bin_path = result.stdout.strip()
+        except Exception as e:
+            print(f"Failed to determine npm bin paths: {str(e)}")
+        
         self.tools = {
             "eslint": self._check_tool("eslint"),
             "jshint": self._check_tool("jshint"),
@@ -44,92 +101,327 @@ class JavaScriptAnalyzer:
                 self._install_tool(tool)
     
     def _check_tool(self, tool_name: str) -> bool:
-        """Check if a tool is available in PATH."""
-        return bool(shutil.which(tool_name))
+        """Check if a tool is available in PATH or in npm bin directories."""
+        # First check regular PATH
+        if shutil.which(tool_name):
+            return True
+        
+        # Then check in npm global bin directory
+        if hasattr(self, 'npm_global_bin_path') and self.npm_global_bin_path:
+            tool_path = os.path.join(self.npm_global_bin_path, tool_name)
+            if os.path.isfile(tool_path) or os.path.isfile(tool_path + '.cmd'):  # Windows uses .cmd files
+                return True
+        
+        # Then check in npm local bin directory
+        if hasattr(self, 'npm_bin_path') and self.npm_bin_path:
+            tool_path = os.path.join(self.npm_bin_path, tool_name)
+            if os.path.isfile(tool_path) or os.path.isfile(tool_path + '.cmd'):
+                return True
+        
+        return False
+
+    def _get_tool_path(self, tool_name: str) -> str:
+        """Get the full path to a tool executable."""
+        # First check regular PATH
+        path = shutil.which(tool_name)
+        if path:
+            return path
+        
+        # Then check in npm global bin directory
+        if hasattr(self, 'npm_global_bin_path') and self.npm_global_bin_path:
+            tool_path = os.path.join(self.npm_global_bin_path, tool_name)
+            cmd_path = tool_path + '.cmd'  # Windows uses .cmd files
+            if os.path.isfile(tool_path):
+                return tool_path
+            elif os.path.isfile(cmd_path):
+                return cmd_path
+        
+        # Then check in npm local bin directory
+        if hasattr(self, 'npm_bin_path') and self.npm_bin_path:
+            tool_path = os.path.join(self.npm_bin_path, tool_name)
+            cmd_path = tool_path + '.cmd'
+            if os.path.isfile(tool_path):
+                return tool_path
+            elif os.path.isfile(cmd_path):
+                return cmd_path
+        
+        # Return just the tool name as a fallback
+        return tool_name
     
     def _install_tool(self, tool_name: str):
-        """Attempt to install a missing tool."""
+        """Try to install a missing tool."""
         try:
-            subprocess.run(
-                ["npm", "install", "-g", tool_name],
-                check=True,
-                capture_output=True
-            )
-            self.tools[tool_name] = True
+            # Map tool names to npm package names if different
+            tool_to_package = {
+                "cr": "complexity-report",
+                "eslint": "eslint",
+                "jshint": "jshint",
+                "flow": "flow-bin",  # Use flow-bin package for flow
+                # Add more mappings as needed
+            }
+            
+            package_name = tool_to_package.get(tool_name, tool_name)
+            
+            # Check if npm is available
+            npm_exists = bool(shutil.which("npm"))
+            if not npm_exists:
+                print(f"Warning: Cannot install {tool_name}. npm not found in PATH. JavaScript analysis may be limited.")
+                return
+            
+            # For Windows, try local installation first as it's more reliable
+            is_windows = os.name == 'nt'
+            if is_windows:
+                # Create a local node_modules directory if needed
+                cwd = os.getcwd()
+                node_modules_path = os.path.join(cwd, "node_modules")
+                if not os.path.exists(node_modules_path):
+                    os.makedirs(node_modules_path, exist_ok=True)
+                
+                # Try local installation first
+                install_cmd = ["npm", "install", package_name]
+                
+                print(f"Installing {package_name} locally...")
+                result = subprocess.run(
+                    install_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=True
+                )
+                
+                if result.returncode == 0:
+                    print(f"Successfully installed {package_name} locally")
+                    # Update npm bin path and check tool again
+                    npm_bin_result = subprocess.run(
+                        ["npm", "bin"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        shell=True
+                    )
+                    if npm_bin_result.returncode == 0:
+                        self.npm_bin_path = npm_bin_result.stdout.strip()
+                        if self._check_tool(tool_name):
+                            self.tools[tool_name] = True
+                            return
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                    print(f"Failed to install {package_name} locally: {error_msg}")
+                
+                    # Try global installation as a fallback
+                    install_cmd = ["npm", "install", "-g", package_name]
+                    print(f"Attempting global installation of {package_name}...")
+                    result = subprocess.run(
+                        install_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        shell=True
+                    )
+                    
+                    if result.returncode == 0:
+                        print(f"Successfully installed {package_name} globally")
+                        # Update global npm bin path and check tool again
+                        npm_prefix_result = subprocess.run(
+                            ["npm", "prefix", "-g"],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            shell=True
+                        )
+                        if npm_prefix_result.returncode == 0:
+                            prefix = npm_prefix_result.stdout.strip()
+                            self.npm_global_bin_path = os.path.join(prefix, "node_modules", ".bin")
+                            if self._check_tool(tool_name):
+                                self.tools[tool_name] = True
+                    else:
+                        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                        print(f"Failed to install {package_name} globally: {error_msg}")
+            else:
+                # For non-Windows systems, try global installation first
+                install_cmd = ["npm", "install", "-g", package_name]
+                
+                print(f"Installing {package_name} globally...")
+                result = subprocess.run(
+                    install_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                if result.returncode != 0:
+                    error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                    print(f"Failed to install {package_name} globally: {error_msg}")
+                    # Try local installation if global fails
+                    print(f"Attempting local installation of {package_name}...")
+                    install_cmd = ["npm", "install", package_name]
+                    result = subprocess.run(
+                        install_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    if result.returncode == 0:
+                        print(f"Successfully installed {package_name} locally")
+                        # Update npm bin path and check tool again
+                        npm_bin_result = subprocess.run(
+                            ["npm", "bin"],
+                            capture_output=True,
+                            text=True,
+                            check=False
+                        )
+                        if npm_bin_result.returncode == 0:
+                            self.npm_bin_path = npm_bin_result.stdout.strip()
+                            if self._check_tool(tool_name):
+                                self.tools[tool_name] = True
+                    else:
+                        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                        print(f"Failed to install {package_name} locally: {error_msg}")
+                else:
+                    print(f"Successfully installed {package_name} globally")
+                    # Update global npm bin path and check tool again
+                    npm_bin_result = subprocess.run(
+                        ["npm", "bin", "-g"],
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    if npm_bin_result.returncode == 0:
+                        self.npm_global_bin_path = npm_bin_result.stdout.strip()
+                        if self._check_tool(tool_name):
+                            self.tools[tool_name] = True
+                
         except Exception as e:
             print(f"Failed to install {tool_name}: {str(e)}")
     
     def analyze_file(self, file_path: str) -> AnalysisResult:
-        """Analyze a single JavaScript file using all available analysis types."""
-        if not os.path.exists(file_path):
-            return AnalysisResult(errors=[f"File not found: {file_path}"])
+        """
+        Perform comprehensive analysis on a JavaScript file.
         
+        Args:
+            file_path: Path to the JavaScript file to analyze
+            
+        Returns:
+            AnalysisResult object containing all findings
+        """
+        # Skip non-JavaScript files
         if not file_path.endswith(('.js', '.jsx', '.ts', '.tsx')):
-            return AnalysisResult(errors=[f"Not a JavaScript/TypeScript file: {file_path}"])
+            return AnalysisResult(
+                findings=[],
+                summary={"skipped": 1},
+                errors=[f"Skipped non-JavaScript file: {file_path}"]
+            )
         
-        result = AnalysisResult()
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return AnalysisResult(
+                findings=[],
+                summary={"error": 1},
+                errors=[f"File not found: {file_path}"]
+            )
         
-        # Run all enabled analyzers
-        for analysis_type in self.config.enabled_analyzers:
-            try:
-                findings = []
-                if analysis_type == AnalysisType.SYNTAX:
-                    findings = self._syntax_analysis(file_path)
-                elif analysis_type == AnalysisType.DATA_FLOW:
-                    findings = self._data_flow_analysis(file_path)
-                elif analysis_type == AnalysisType.CONTROL_FLOW:
-                    findings = self._control_flow_analysis(file_path)
-                elif analysis_type == AnalysisType.METRICS:
-                    findings = self._metrics_analysis(file_path)
-                elif analysis_type == AnalysisType.RULE_BASED:
-                    findings = self._rule_based_analysis(file_path)
-                elif analysis_type == AnalysisType.PATTERN:
-                    findings = self._pattern_analysis(file_path)
-                elif analysis_type == AnalysisType.SYMBOLIC:
-                    findings = self._symbolic_analysis(file_path)
-                elif analysis_type == AnalysisType.TAINT:
-                    findings = self._taint_analysis(file_path)
-                elif analysis_type == AnalysisType.LEXICAL:
-                    findings = self._lexical_analysis(file_path)
-                elif analysis_type == AnalysisType.MEMORY:
-                    findings = self._memory_analysis(file_path)
-                
-                result.findings.extend(findings)
-            except Exception as e:
-                result.errors.append(f"Error in {analysis_type} analysis: {str(e)}")
+        findings = []
+        errors = []
         
-        # Update summary
-        for finding in result.findings:
-            result.summary[finding.type.value] = result.summary.get(finding.type.value, 0) + 1
-            severity_key = f"{finding.type.value}_{finding.severity.value}"
-            result.summary[severity_key] = result.summary.get(severity_key, 0) + 1
+        # Try to run each type of analysis, continuing even if some fail
+        try:
+            findings.extend(self._syntax_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Syntax analysis failed: {str(e)}")
         
-        return result
+        try:
+            findings.extend(self._data_flow_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Data flow analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._control_flow_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Control flow analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._metrics_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Metrics analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._rule_based_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Rule-based analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._pattern_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Pattern analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._symbolic_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Symbolic analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._taint_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Taint analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._lexical_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Lexical analysis failed: {str(e)}")
+        
+        try:
+            findings.extend(self._memory_analysis(file_path))
+        except Exception as e:
+            errors.append(f"Memory analysis failed: {str(e)}")
+        
+        # Create summary by severity and type
+        summary = {}
+        for finding in findings:
+            # Count by severity
+            severity = finding.severity.value
+            summary[severity] = summary.get(severity, 0) + 1
+            
+            # Count by type
+            analysis_type = finding.type.value
+            summary[analysis_type] = summary.get(analysis_type, 0) + 1
+        
+        # Add error count to summary if there were errors
+        if errors:
+            summary["errors"] = len(errors)
+        
+        return AnalysisResult(
+            findings=findings,
+            summary=summary,
+            errors=errors
+        )
     
     def _syntax_analysis(self, file_path: str) -> List[AnalysisFinding]:
         """Perform syntax analysis using ESLint."""
         findings = []
         
         if self.tools["eslint"]:
-            cmd = ["eslint", "--format=json", file_path]
+            eslint_path = self._get_tool_path("eslint")
+            cmd = [eslint_path, "--format=json", file_path]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.SYNTAX,
-                            severity=self._map_severity(message.get("severity", 1)),
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId"),
-                            fix_suggestions=[message.get("fix", {}).get("text", "")]
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.SYNTAX,
+                                severity=self._map_severity(message.get("severity", 1)),
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId"),
+                                fix_suggestions=[message.get("fix", {}).get("text", "")]
+                            ))
             except Exception as e:
                 print(f"ESLint analysis failed: {str(e)}")
         
@@ -140,24 +432,26 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["flow"]:
-            cmd = ["flow", "check", "--json", file_path]
+            flow_path = self._get_tool_path("flow")
+            cmd = [flow_path, "check", "--json", file_path]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for error in data.get("errors", []):
-                    for message in error.get("message", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.DATA_FLOW,
-                            severity=SeverityLevel.MEDIUM,
-                            message=message.get("descr", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("start", 1),
-                                column_end=message.get("end", 1)
-                            )
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for error in data.get("errors", []):
+                        for message in error.get("message", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.DATA_FLOW,
+                                severity=SeverityLevel.MEDIUM,
+                                message=message.get("descr", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("start", 1),
+                                    column_end=message.get("end", 1)
+                                )
+                            ))
             except Exception as e:
                 print(f"Flow analysis failed: {str(e)}")
         
@@ -168,25 +462,27 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["eslint"]:
+            eslint_path = self._get_tool_path("eslint")
             # Use ESLint rules specific to control flow
-            cmd = ["eslint", "--format=json", "--rule", "no-unreachable:error", file_path]
+            cmd = [eslint_path, "--format=json", "--rule", "no-unreachable:error", file_path]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.CONTROL_FLOW,
-                            severity=SeverityLevel.HIGH,
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId")
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.CONTROL_FLOW,
+                                severity=SeverityLevel.HIGH,
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId")
+                            ))
             except Exception as e:
                 print(f"Control flow analysis failed: {str(e)}")
         
@@ -197,27 +493,29 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["complexity-report"]:
-            cmd = ["cr", "--format=json", file_path]
+            cr_path = self._get_tool_path("cr")
+            cmd = [cr_path, "--format=json", file_path]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for func in data.get("functions", []):
-                    if func.get("cyclomatic", 0) > 10:
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.METRICS,
-                            severity=SeverityLevel.MEDIUM,
-                            message=f"High cyclomatic complexity ({func['cyclomatic']}) in function {func.get('name', 'anonymous')}",
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=func.get("line", 1)
-                            ),
-                            fix_suggestions=[
-                                "Break down the function into smaller functions",
-                                "Reduce nested conditionals",
-                                "Use early returns"
-                            ]
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for func in data.get("functions", []):
+                        if func.get("cyclomatic", 0) > 10:
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.METRICS,
+                                severity=SeverityLevel.MEDIUM,
+                                message=f"High cyclomatic complexity ({func['cyclomatic']}) in function {func.get('name', 'anonymous')}",
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=func.get("line", 1)
+                                ),
+                                fix_suggestions=[
+                                    "Break down the function into smaller functions",
+                                    "Reduce nested conditionals",
+                                    "Use early returns"
+                                ]
+                            ))
             except Exception as e:
                 print(f"Metrics analysis failed: {str(e)}")
         
@@ -228,23 +526,25 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["jshint"]:
-            cmd = ["jshint", "--reporter=json", file_path]
+            jshint_path = self._get_tool_path("jshint")
+            cmd = [jshint_path, "--reporter=json", file_path]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for error in data:
-                    findings.append(AnalysisFinding(
-                        type=AnalysisType.RULE_BASED,
-                        severity=self._map_severity(error.get("code", "")),
-                        message=error.get("reason", ""),
-                        location=CodeLocation(
-                            file=file_path,
-                            line_start=error.get("line", 1),
-                            column_start=error.get("character", 1)
-                        ),
-                        rule_id=error.get("code")
-                    ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for error in data:
+                        findings.append(AnalysisFinding(
+                            type=AnalysisType.RULE_BASED,
+                            severity=self._map_severity(error.get("code", "")),
+                            message=error.get("reason", ""),
+                            location=CodeLocation(
+                                file=file_path,
+                                line_start=error.get("line", 1),
+                                column_start=error.get("character", 1)
+                            ),
+                            rule_id=error.get("code")
+                        ))
             except Exception as e:
                 print(f"JSHint analysis failed: {str(e)}")
         
@@ -255,6 +555,7 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["eslint"]:
+            eslint_path = self._get_tool_path("eslint")
             # Use ESLint rules for common patterns
             pattern_rules = {
                 "no-with": "error",
@@ -263,28 +564,29 @@ class JavaScriptAnalyzer:
                 "no-param-reassign": "error"
             }
             
-            cmd = ["eslint", "--format=json"]
+            cmd = [eslint_path, "--format=json"]
             for rule, level in pattern_rules.items():
                 cmd.extend(["--rule", f"{rule}:{level}"])
             cmd.append(file_path)
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.PATTERN,
-                            severity=SeverityLevel.HIGH,
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId")
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.PATTERN,
+                                severity=SeverityLevel.HIGH,
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId")
+                            ))
             except Exception as e:
                 print(f"Pattern analysis failed: {str(e)}")
         
@@ -295,6 +597,7 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["eslint"]:
+            eslint_path = self._get_tool_path("eslint")
             # Use ESLint rules for potential runtime errors
             symbolic_rules = {
                 "no-unsafe-negation": "error",
@@ -303,28 +606,29 @@ class JavaScriptAnalyzer:
                 "no-self-compare": "error"
             }
             
-            cmd = ["eslint", "--format=json"]
+            cmd = [eslint_path, "--format=json"]
             for rule, level in symbolic_rules.items():
                 cmd.extend(["--rule", f"{rule}:{level}"])
             cmd.append(file_path)
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.SYMBOLIC,
-                            severity=SeverityLevel.HIGH,
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId")
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.SYMBOLIC,
+                                severity=SeverityLevel.HIGH,
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId")
+                            ))
             except Exception as e:
                 print(f"Symbolic analysis failed: {str(e)}")
         
@@ -335,128 +639,153 @@ class JavaScriptAnalyzer:
         findings = []
         
         if self.tools["eslint"]:
+            eslint_path = self._get_tool_path("eslint")
             # Use ESLint security rules
             security_rules = {
                 "no-eval": "error",
                 "no-implied-eval": "error",
                 "security/detect-non-literal-regexp": "error",
                 "security/detect-unsafe-regex": "error",
-                "security/detect-buffer-noassert": "error"
+                "security/detect-buffer-noassert": "error",
+                "security/detect-child-process": "error",
+                "security/detect-disable-mustache-escape": "error",
+                "security/detect-eval-with-expression": "error",
+                "security/detect-no-csrf-before-method-override": "error",
+                "security/detect-non-literal-fs-filename": "error",
+                "security/detect-pseudoRandomBytes": "error",
+                "security/detect-possible-timing-attacks": "error"
             }
             
-            cmd = ["eslint", "--format=json"]
+            cmd = [eslint_path, "--format=json"]
             for rule, level in security_rules.items():
                 cmd.extend(["--rule", f"{rule}:{level}"])
             cmd.append(file_path)
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.TAINT,
-                            severity=SeverityLevel.CRITICAL,
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId"),
-                            fix_suggestions=[
-                                "Sanitize input data before using it in sensitive operations",
-                                "Use safe alternatives to dangerous functions",
-                                "Implement proper input validation"
-                            ]
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.TAINT,
+                                severity=SeverityLevel.CRITICAL,
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId")
+                            ))
             except Exception as e:
                 print(f"Taint analysis failed: {str(e)}")
         
         return findings
     
     def _lexical_analysis(self, file_path: str) -> List[AnalysisFinding]:
-        """Perform lexical analysis using ESLint style rules."""
+        """Perform lexical analysis using JSHint."""
         findings = []
         
-        if self.tools["eslint"]:
-            # Use ESLint style rules
-            style_rules = {
-                "indent": ["error", 2],
-                "linebreak-style": ["error", "unix"],
-                "quotes": ["error", "single"],
-                "semi": ["error", "always"],
-                "max-len": ["error", {"code": 80}]
+        if self.tools["jshint"]:
+            jshint_path = self._get_tool_path("jshint")
+            # Focus on lexical issues
+            lexical_rules = {
+                "asi": False,  # Enforce semicolons
+                "curly": True,  # Require curly braces for loops and conditionals
+                "eqeqeq": True,  # Require === and !==
+                "forin": True,  # Require hasOwnProperty checks in for-in loops
+                "noarg": True,  # Prohibit use of arguments.caller and arguments.callee
+                "noempty": True,  # Prohibit empty blocks
+                "nonew": True,  # Prohibit use of constructors for side-effects
+                "undef": True,  # Require variables to be declared
+                "unused": True  # Warn about unused variables
             }
             
-            cmd = ["eslint", "--format=json"]
-            for rule, config in style_rules.items():
-                cmd.extend(["--rule", f"{rule}:{json.dumps(config)}"])
-            cmd.append(file_path)
+            # Convert Python booleans to JSON booleans
+            json_rules = {}
+            for key, value in lexical_rules.items():
+                if value is True:
+                    json_rules[key] = "true"
+                elif value is False:
+                    json_rules[key] = "false"
+                else:
+                    json_rules[key] = value
+            
+            # Create a temporary .jshintrc file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                json.dump(json_rules, tmp)
+                tmp_path = tmp.name
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
+                cmd = [jshint_path, "--config", tmp_path, "--reporter=json", file_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for error in data:
                         findings.append(AnalysisFinding(
                             type=AnalysisType.LEXICAL,
-                            severity=SeverityLevel.LOW,
-                            message=message.get("message", ""),
+                            severity=self._map_severity(error.get("code", "")),
+                            message=error.get("reason", ""),
                             location=CodeLocation(
                                 file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
+                                line_start=error.get("line", 1),
+                                column_start=error.get("character", 1)
                             ),
-                            rule_id=message.get("ruleId")
+                            rule_id=error.get("code")
                         ))
             except Exception as e:
                 print(f"Lexical analysis failed: {str(e)}")
+            finally:
+                # Clean up the temporary file
+                os.unlink(tmp_path)
         
         return findings
     
     def _memory_analysis(self, file_path: str) -> List[AnalysisFinding]:
-        """Perform memory leak analysis."""
+        """Perform memory usage analysis using ESLint rules."""
         findings = []
         
         if self.tools["eslint"]:
-            # Use ESLint rules for memory leaks
+            eslint_path = self._get_tool_path("eslint")
+            # Rules related to memory leaks and usage
             memory_rules = {
-                "no-unused-vars": "error",
-                "no-undef": "error",
                 "no-global-assign": "error",
-                "no-shadow": "error"
+                "no-extend-native": "error",
+                "no-extra-bind": "error",
+                "no-implicit-globals": "error",
+                "no-this-before-super": "error",
+                "no-unused-vars": "error",
+                "no-use-before-define": "error",
+                "no-useless-call": "error",
+                "no-useless-concat": "error"
             }
             
-            cmd = ["eslint", "--format=json"]
+            cmd = [eslint_path, "--format=json"]
             for rule, level in memory_rules.items():
                 cmd.extend(["--rule", f"{rule}:{level}"])
             cmd.append(file_path)
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_result in data:
-                    for message in file_result.get("messages", []):
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.MEMORY,
-                            severity=SeverityLevel.MEDIUM,
-                            message=message.get("message", ""),
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=message.get("line", 1),
-                                column_start=message.get("column", 1)
-                            ),
-                            rule_id=message.get("ruleId"),
-                            fix_suggestions=[
-                                "Clean up unused variables",
-                                "Use proper variable scoping",
-                                "Avoid memory leaks in closures"
-                            ]
-                        ))
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=(os.name == 'nt'))
+                if result.stdout:
+                    data = json.loads(result.stdout)
+                    
+                    for file_result in data:
+                        for message in file_result.get("messages", []):
+                            findings.append(AnalysisFinding(
+                                type=AnalysisType.MEMORY,
+                                severity=SeverityLevel.MEDIUM,
+                                message=message.get("message", ""),
+                                location=CodeLocation(
+                                    file=file_path,
+                                    line_start=message.get("line", 1),
+                                    column_start=message.get("column", 1)
+                                ),
+                                rule_id=message.get("ruleId")
+                            ))
             except Exception as e:
                 print(f"Memory analysis failed: {str(e)}")
         

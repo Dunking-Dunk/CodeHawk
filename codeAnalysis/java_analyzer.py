@@ -8,16 +8,23 @@ from typing import Dict, List, Any, Optional, Union, Set
 from pathlib import Path
 import shutil
 
+# Fix imports to handle both package and direct imports
 try:
     from .models.analysis_models import (
         AnalysisResult, AnalysisFinding, CodeLocation,
         SeverityLevel, AnalysisType, AnalysisConfig
     )
 except ImportError:
-    from models.analysis_models import (
-        AnalysisResult, AnalysisFinding, CodeLocation,
-        SeverityLevel, AnalysisType, AnalysisConfig
-    )
+    try:
+        from models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
+    except ImportError:
+        from codeAnalysis.models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
 
 class JavaAnalyzer:
     """

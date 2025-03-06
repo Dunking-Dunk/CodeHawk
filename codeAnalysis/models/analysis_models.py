@@ -45,11 +45,10 @@ class AnalysisResult(BaseModel):
     metrics: Dict[str, Any] = Field(default_factory=dict, description="Code metrics (complexity, coverage, etc.)")
     errors: List[str] = Field(default_factory=list, description="Analysis errors or failures")
 
-@dataclass
-class AnalysisConfig:
-    enabled_analyzers: List[AnalysisType] = Field(default_factory=lambda: list(AnalysisType))
-    severity_threshold: SeverityLevel = SeverityLevel.LOW
-    max_findings_per_file: int = 100
-    ignore_patterns: List[str] = Field(default_factory=list)
-    custom_rules: Dict[str, Any] = Field(default_factory=dict)
-    language_specific_config: Dict[str, Any] = Field(default_factory=dict) 
+class AnalysisConfig(BaseModel):
+    enabled_analyzers: List[AnalysisType] = Field(default_factory=lambda: list(AnalysisType), description="Enabled analyzers")
+    severity_threshold: SeverityLevel = Field(default=SeverityLevel.LOW, description="Minimum severity level to report")
+    max_findings_per_file: int = Field(default=100, description="Maximum findings to report per file")
+    ignore_patterns: List[str] = Field(default_factory=list, description="Patterns to ignore")
+    custom_rules: Dict[str, Any] = Field(default_factory=dict, description="Custom analysis rules")
+    language_specific_config: Dict[str, Any] = Field(default_factory=dict, description="Language-specific configuration") 

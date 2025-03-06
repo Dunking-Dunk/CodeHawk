@@ -8,16 +8,23 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Set
 from dataclasses import dataclass
 
+# Fix imports to handle both package and direct imports
 try:
     from .models.analysis_models import (
         AnalysisResult, AnalysisFinding, CodeLocation,
         SeverityLevel, AnalysisType, AnalysisConfig
     )
 except ImportError:
-    from models.analysis_models import (
-        AnalysisResult, AnalysisFinding, CodeLocation,
-        SeverityLevel, AnalysisType, AnalysisConfig
-    )
+    try:
+        from models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
+    except ImportError:
+        from codeAnalysis.models.analysis_models import (
+            AnalysisResult, AnalysisFinding, CodeLocation,
+            SeverityLevel, AnalysisType, AnalysisConfig
+        )
 
 class PythonAnalyzer:
     """
@@ -49,14 +56,60 @@ class PythonAnalyzer:
         return bool(shutil.which(tool_name))
     
     def _install_tool(self, tool_name: str):
-        """Attempt to install a missing tool."""
+        """Try to install a missing tool using pip."""
         try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", tool_name],
-                check=True,
-                capture_output=True
+            # Map tool names to pip package names if different
+            tool_to_package = {
+                "prospector": "prospector[with_everything]",
+                # Add more mappings if needed
+            }
+            
+            package_name = tool_to_package.get(tool_name, tool_name)
+            
+            # Check if pip is available
+            pip_cmd = [sys.executable, "-m", "pip"]
+            try:
+                subprocess.run(
+                    pip_cmd + ["--version"],
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+            except (subprocess.SubprocessError, FileNotFoundError):
+                print(f"Warning: Cannot install {tool_name}. pip not available. Python analysis may be limited.")
+                return
+            
+            print(f"Installing {package_name}...")
+            result = subprocess.run(
+                pip_cmd + ["install", package_name],
+                capture_output=True,
+                text=True,
+                check=False
             )
-            self.tools[tool_name] = True
+            
+            if result.returncode == 0:
+                print(f"Successfully installed {package_name}")
+                self.tools[tool_name] = True
+            else:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                print(f"Failed to install {package_name}: {error_msg}")
+                
+                # Try with --user flag if permission error
+                if "Permission denied" in error_msg or "Access is denied" in error_msg:
+                    print(f"Trying to install {package_name} with --user flag...")
+                    result = subprocess.run(
+                        pip_cmd + ["install", "--user", package_name],
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    
+                    if result.returncode == 0:
+                        print(f"Successfully installed {package_name} with --user flag")
+                        self.tools[tool_name] = True
+                    else:
+                        error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                        print(f"Failed to install {package_name} with --user flag: {error_msg}")
         except Exception as e:
             print(f"Failed to install {tool_name}: {str(e)}")
     
@@ -154,27 +207,46 @@ class PythonAnalyzer:
         return findings
     
     def _data_flow_analysis(self, file_path: str) -> List[AnalysisFinding]:
-        """Perform data flow analysis using mypy."""
+        """Analyze data flow issues with tools like mypy."""
         findings = []
         
+        # Run mypy for type checking (which helps find data flow issues)
         if self.tools["mypy"]:
-            cmd = ["mypy", "--show-column-numbers", file_path]
             try:
+                cmd = ["mypy", "--show-column-numbers", file_path]
                 result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                
+                # Process mypy output
                 for line in result.stdout.splitlines():
-                    if ":" in line:
-                        parts = line.split(":")
-                        if len(parts) >= 4:
-                            findings.append(AnalysisFinding(
-                                type=AnalysisType.DATA_FLOW,
-                                severity=SeverityLevel.MEDIUM,
-                                message=parts[3].strip(),
-                                location=CodeLocation(
-                                    file=file_path,
-                                    line_start=int(parts[1]),
-                                    column_start=int(parts[2])
-                                )
-                            ))
+                    # Parse mypy output format: file:line:column: severity: message
+                    parts = line.split(":", 4)
+                    if len(parts) >= 5:
+                        try:
+                            if parts[0] == file_path:  # Make sure it's for our file
+                                line_num = int(parts[1])
+                                col_num = int(parts[2]) if parts[2].strip().isdigit() else 0
+                                severity_text = parts[3].strip()
+                                msg = parts[4].strip()
+                                
+                                # Map severity
+                                severity = SeverityLevel.MEDIUM
+                                if "error" in severity_text.lower():
+                                    severity = SeverityLevel.HIGH
+                                
+                                findings.append(AnalysisFinding(
+                                    type=AnalysisType.DATA_FLOW,
+                                    severity=severity,
+                                    message=f"Type check issue: {msg}",
+                                    location=CodeLocation(
+                                        file=file_path,
+                                        line_start=line_num,
+                                        column_start=col_num
+                                    ),
+                                    rule_id="MYPY"
+                                ))
+                        except (ValueError, IndexError) as e:
+                            print(f"MyPy analysis parsing error on line: {line} - {str(e)}")
+                
             except Exception as e:
                 print(f"MyPy analysis failed: {str(e)}")
         
@@ -242,56 +314,57 @@ class PythonAnalyzer:
         return findings
     
     def _metrics_analysis(self, file_path: str) -> List[AnalysisFinding]:
-        """Perform metrics-based analysis using radon."""
+        """Analyze code metrics like complexity, maintainability, etc."""
         findings = []
         
-        if self.tools["radon"]:
-            # Cyclomatic Complexity
-            cmd = ["radon", "cc", "-j", file_path]
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_data in data.values():
-                    for func in file_data:
-                        if func["complexity"] > 10:  # High complexity threshold
-                            findings.append(AnalysisFinding(
-                                type=AnalysisType.METRICS,
-                                severity=SeverityLevel.MEDIUM,
-                                message=f"High cyclomatic complexity ({func['complexity']}) in function {func['name']}",
-                                location=CodeLocation(
-                                    file=file_path,
-                                    line_start=func["lineno"]
-                                ),
-                                fix_suggestions=["Consider breaking down the function into smaller functions",
-                                               "Reduce nested conditionals",
-                                               "Use early returns to reduce nesting"]
-                            ))
-            except Exception as e:
-                print(f"Radon complexity analysis failed: {str(e)}")
+        # Run radon to calculate maintainability index
+        try:
+            # Call radon mi on the file
+            cmd = ["radon", "mi", file_path, "-s"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             
-            # Maintainability Index
-            cmd = ["radon", "mi", "-j", file_path]
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                data = json.loads(result.stdout)
-                
-                for file_path, mi_score in data.items():
-                    if mi_score < 65:  # Low maintainability threshold
-                        findings.append(AnalysisFinding(
-                            type=AnalysisType.METRICS,
-                            severity=SeverityLevel.HIGH,
-                            message=f"Low maintainability index ({mi_score})",
-                            location=CodeLocation(
-                                file=file_path,
-                                line_start=1
-                            ),
-                            fix_suggestions=["Improve code documentation",
-                                           "Reduce function complexity",
-                                           "Break down large functions and classes"]
-                        ))
-            except Exception as e:
-                print(f"Radon maintainability analysis failed: {str(e)}")
+            if result.returncode == 0:
+                # Parse the maintainability index
+                for line in result.stdout.splitlines():
+                    if " - " in line:
+                        parts = line.split(" - ")
+                        if len(parts) >= 2:
+                            file_info = parts[0].strip()
+                            mi_score_text = parts[1].strip()
+                            
+                            try:
+                                mi_score = float(mi_score_text.split()[0])  # Extract numeric part
+                                severity = SeverityLevel.LOW
+                                
+                                if mi_score < 20:
+                                    severity = SeverityLevel.CRITICAL
+                                    message = f"Extremely low maintainability index: {mi_score}"
+                                elif mi_score < 40:
+                                    severity = SeverityLevel.HIGH
+                                    message = f"Very low maintainability index: {mi_score}"
+                                elif mi_score < 60:
+                                    severity = SeverityLevel.MEDIUM
+                                    message = f"Low maintainability index: {mi_score}"
+                                else:
+                                    continue  # Skip good maintainability scores
+                                
+                                findings.append(AnalysisFinding(
+                                    type=AnalysisType.METRICS,
+                                    severity=severity,
+                                    message=message,
+                                    location=CodeLocation(
+                                        file=file_path,
+                                        line_start=1  # Maintainability is for the whole file
+                                    ),
+                                    rule_id="RADON-MI",
+                                    additional_info={"mi_score": mi_score}
+                                ))
+                            except (ValueError, IndexError):
+                                print(f"Radon maintainability analysis failed: Invalid score format")
+            else:
+                print(f"Radon maintainability analysis failed: {result.stderr.strip()}")
+        except Exception as e:
+            print(f"Radon maintainability analysis failed: {str(e)}")
         
         return findings
     
@@ -447,59 +520,106 @@ class PythonAnalyzer:
         return findings
     
     def _taint_analysis(self, file_path: str) -> List[AnalysisFinding]:
-        """Perform taint analysis for security vulnerabilities."""
+        """Identify potential security issues from data flow."""
         findings = []
         
         try:
             with open(file_path, 'r') as f:
-                tree = ast.parse(f.read())
+                code = f.read()
+            
+            tree = ast.parse(code, filename=file_path)
+            
+            # Track tainted variables from inputs
+            tainted_sources = {
+                'input', 'raw_input',  # Python 2 & 3 input functions
+                'request.form', 'request.args', 'request.json', 'request.data',  # Flask/web inputs
+                'request.GET', 'request.POST',  # Django inputs
+                'readline', 'sys.stdin.read', 'sys.stdin.readline',  # Standard input
+                'urlopen', 'open',  # File and URL reading
+            }
+            
+            dangerous_sinks = {
+                'eval', 'exec', 'subprocess.call', 'subprocess.Popen', 'os.system',  # Code execution
+                'execute', 'executemany',  # SQL execution
+                'run', 'shell',  # Shell commands
+                'render_template_string',  # Template rendering
+            }
             
             class TaintVisitor(ast.NodeVisitor):
                 def __init__(self):
-                    self.issues = []
-                    self.taint_sources = {
-                        'input', 'request', 'get', 'post',
-                        'files', 'cookies', 'headers'
-                    }
-                    self.dangerous_sinks = {
-                        'eval', 'exec', 'os.system', 'subprocess.run',
-                        'subprocess.Popen', 'open'
-                    }
+                    self.tainted_vars = set()
+                    self.findings = []
+                
+                def get_name(self, node):
+                    """Safely extract name from various node types"""
+                    try:
+                        if isinstance(node, ast.Name):
+                            return node.id
+                        elif isinstance(node, ast.Attribute):
+                            # Handle multi-level attributes like request.form.get
+                            parts = []
+                            current = node
+                            while isinstance(current, ast.Attribute):
+                                parts.append(current.attr)
+                                current = current.value
+                            if isinstance(current, ast.Name):
+                                parts.append(current.id)
+                            return '.'.join(reversed(parts))
+                        elif isinstance(node, ast.Call):
+                            return self.get_name(node.func)
+                        return None
+                    except Exception:
+                        return None
                 
                 def visit_Call(self, node):
-                    # Check for direct use of tainted data in dangerous sinks
-                    func_name = ''
-                    if isinstance(node.func, ast.Name):
-                        func_name = node.func.id
-                    elif isinstance(node.func, ast.Attribute):
-                        func_name = f"{node.func.value.id}.{node.func.attr}"
+                    # Check if this is a tainted source
+                    func_name = self.get_name(node.func)
+                    if func_name:
+                        if func_name in tainted_sources:
+                            # Mark the variable as tainted if it's assigned
+                            parent = getattr(node, 'parent', None)
+                            if isinstance(parent, ast.Assign):
+                                for target in parent.targets:
+                                    if isinstance(target, ast.Name):
+                                        self.tainted_vars.add(target.id)
+                        
+                        # Check for dangerous sinks with tainted data
+                        elif func_name in dangerous_sinks:
+                            for arg in node.args:
+                                arg_name = self.get_name(arg)
+                                if arg_name in self.tainted_vars:
+                                    self.findings.append((node, arg_name, func_name))
                     
-                    if func_name in self.dangerous_sinks:
-                        self.issues.append((
-                            node.lineno,
-                            f"Potential security vulnerability: {func_name} might be called with tainted data"
-                        ))
-                    
+                    # Continue visiting child nodes
                     self.generic_visit(node)
+            
+            # Add parent references for better analysis
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    child.parent = node
             
             visitor = TaintVisitor()
             visitor.visit(tree)
             
-            for line, msg in visitor.issues:
+            # Create findings from taint analysis
+            for node, tainted_var, sink_name in visitor.findings:
                 findings.append(AnalysisFinding(
                     type=AnalysisType.TAINT,
                     severity=SeverityLevel.CRITICAL,
-                    message=msg,
+                    message=f"Potential security vulnerability: tainted data from '{tainted_var}' used in dangerous sink '{sink_name}'",
                     location=CodeLocation(
                         file=file_path,
-                        line_start=line
+                        line_start=node.lineno,
+                        column_start=node.col_offset
                     ),
                     fix_suggestions=[
-                        "Sanitize input data before using it in sensitive operations",
-                        "Use safe alternatives to dangerous functions",
-                        "Implement proper input validation"
-                    ]
+                        f"Sanitize input from '{tainted_var}' before using it in '{sink_name}'",
+                        "Use parameterized queries or prepared statements for database operations",
+                        "Use safe APIs that prevent code injection"
+                    ],
+                    rule_id="TAINT-FLOW"
                 ))
+        
         except Exception as e:
             print(f"Taint analysis failed: {str(e)}")
         
